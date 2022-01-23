@@ -127,11 +127,8 @@ export class PasswordService<ID> {
     if (this.hasTwoFactors) {
       const required = await this.hasTwoFactors(user.id);
       if (required) {
-        if (!pass.passcode || pass.passcode.length === 0) {
-          return 0;
-        }
         const repo = (this.passcodeRepository ? this.passcodeRepository : this.resetCodeRepository);
-        if (!pass.step || pass.step <= 0) {
+        if (!pass.step || pass.step <= 1) {
           const sentCode = this.generate();
           const savedCode = await this.comparator.hash(sentCode);
           const expires = (this.passwordChangeExpires ? this.passwordChangeExpires : this.expires);
@@ -143,6 +140,9 @@ export class PasswordService<ID> {
             return 2;
           }
         } else {
+          if (!pass.passcode || pass.passcode.length === 0) {
+            return 0;
+          }
           const code = await repo.load(user.id);
           if (!code) {
             return 0;
@@ -152,8 +152,9 @@ export class PasswordService<ID> {
           }
           const validPasscode = await this.comparator.compare(pass.passcode, code.code);
           if (!validPasscode) {
-            await repo.delete(user.id);
             return 0;
+          } else {
+            await repo.delete(user.id);
           }
         }
       }
