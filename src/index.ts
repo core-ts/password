@@ -1,5 +1,15 @@
 import * as util from 'util';
 
+export interface Tables {
+  user: string;
+  password: string;
+  history: string;
+}
+export interface TablesConfig {
+  user: string;
+  password?: string;
+  history?: string;
+}
 export interface Collections {
   user: string;
   password: string;
@@ -11,6 +21,7 @@ export interface CollectionsConfig {
   history?: string;
 }
 export interface FieldConfig {
+  id?: string;
   contact?: string;
   username?: string;
   password?: string;
@@ -18,6 +29,7 @@ export interface FieldConfig {
   changedTime?: string;
   failCount?: string;
 }
+
 export interface Template {
   subject: string;
   body: string;
@@ -56,7 +68,7 @@ export interface Passcode {
 }
 export interface PasscodeRepository<ID> {
   save(id: ID, passcode: string, expireAt: Date): Promise<number>;
-  load(id: ID): Promise<Passcode>;
+  load(id: ID): Promise<Passcode|null|undefined>;
   delete(id: ID): Promise<number>;
 }
 export interface User<ID> {
@@ -66,7 +78,7 @@ export interface User<ID> {
   contact: string;
 }
 export interface PasswordRepository<ID> {
-  getUser(userNameOrEmail: string, exludePassword?: boolean): Promise<User<ID>>;
+  getUser(userNameOrEmail: string, exludePassword?: boolean): Promise<User<ID>|null|undefined>;
   update(userId: ID, newPassword: string, oldPassword?: string): Promise<number>;
   getHistory(userId: ID, max?: number): Promise<string[]>;
 }
@@ -307,3 +319,219 @@ export class MailSender {
     return this.sendMail(msg);
   }
 }
+
+export function initTables(c: TablesConfig): Tables {
+  const co: Tables = {user: c.user, password: c.user, history: c.user};
+  if (c.password && c.password.length > 0) {
+    co.password = c.password;
+  }
+  co.history = (c.history && c.history.length > 0 ? c.history : co.password);
+  return co;
+}
+export function useRepository<ID>(db: DB, c: TablesConfig, max?: number, fields?: FieldConfig): Repository<ID> {
+  const conf = initTables(c);
+  if (fields) {
+    return new Repository<ID>(db, conf, fields.id, fields.contact, fields.username, fields.password, fields.history, fields.changedTime, fields.failCount, max);
+  } else {
+    return new Repository<ID>(db, conf, undefined, undefined, undefined, undefined, undefined, undefined, undefined, max);
+  }
+}
+export const usePasswordRepository = useRepository;
+export const useMongoPasswordRepository = useRepository;
+export interface StringMap {
+  [key: string]: string;
+}
+export interface Statement {
+  query: string;
+  params?: any[];
+}
+export interface DB {
+  param(i: number): string;
+  exec(sql: string, args?: any[], ctx?: any): Promise<number>;
+  execBatch(statements: Statement[], firstSuccess?: boolean, ctx?: any): Promise<number>;
+  query<T>(sql: string, args?: any[], m?: StringMap): Promise<T[]>;
+}
+export class Repository<ID> {
+  max: number;
+  id: string;
+  contact: string;
+  username: string;
+  password: string;
+  history: string;
+  constructor(
+    public db: DB,
+    public tables: Tables,
+    id?: string,
+    contact?: string,
+    username?: string,
+    password?: string,
+    history?: string,
+    public changedTime?: string,
+    public failCount?: string,
+    max?: number,
+  ) {
+    this.max = (max !== undefined ? max : 8);
+    this.id = (id && id.length > 0 ? id : 'id');
+    this.username = (username && username.length > 0 ? username : 'username');
+    this.contact = (contact && contact.length > 0 ? contact : 'email');
+    this.password = (password && password.length > 0 ? password : 'password');
+    this.history = (history && history.length > 0 ? history : 'history');
+    this.getUser = this.getUser.bind(this);
+    this.update = this.update.bind(this);
+    this.getHistory = this.getHistory.bind(this);
+  }
+  getUser(userNameOrEmail: string, exludePassword?: boolean): Promise<User<ID>|null|undefined> {
+    let query = `
+        select ${this.id} as id, ${this.username} as username, ${this.contact} as contact from ${this.tables.user} where ${this.username} = ${this.db.param(1)} union
+        select ${this.id} as id, ${this.username} as username, ${this.contact} as contact from ${this.tables.user} where ${this.contact} = ${this.db.param(2)}`;
+    if (!exludePassword) {
+      if (this.tables.user === this.tables.password) {
+        query = `
+          select ${this.id} as id, ${this.username} as username, ${this.contact} as contact, ${this.password} as password from ${this.tables.user} where ${this.username} = ${this.db.param(1)} union
+          select ${this.id} as id, ${this.username} as username, ${this.contact} as contact, ${this.password} as password from ${this.tables.user} where ${this.contact} = ${this.db.param(2)}`;
+      } else {
+        query = `
+          select u.${this.id} as id, u.${this.username} as username, u.${this.contact} as contact, p.${this.password} as password
+          from ${this.tables.user} as u
+          left join ${this.tables.password} as p
+            on u.${this.id} = p.${this.id}
+          where ${this.username} = ${this.db.param(1)}
+          union
+          select u.${this.id} as id, u.${this.username} as username, u.${this.contact} as contact, p.${this.password} as password
+          from ${this.tables.user} as u
+          left join ${this.tables.password} as p
+            on u.${this.id} = p.${this.id}
+          where ${this.contact} = ${this.db.param(2)}`;
+      }
+    }
+    return this.db.query<User<ID>>(query, [userNameOrEmail, userNameOrEmail]).then(v => {
+      if (!v || v.length === 0) {
+        return null;
+      } else {
+        return v[0];
+      }
+    });
+  }
+  update(userId: ID, newPassword: string, oldPassword?: string): Promise<number> {
+    const pass: any = {
+      [this.password]: newPassword,
+    };
+    if (this.changedTime && this.changedTime.length > 0) {
+      pass[this.changedTime] = new Date();
+    }
+    if (this.failCount && this.failCount.length > 0) {
+      pass[this.failCount] = 0;
+    }
+    const history = this.history;
+    if (oldPassword && history && history.length > 0) {
+      const query = `select ${history} from ${this.tables.history} where ${this.id} = ${this.db.param(1)}`;
+      return this.db.query(query, [userId]).then(v => {
+        if (!v || v.length === 0) {
+          const sh = `insert into ${this.tables.history} (${this.id}, ${this.history}) values (${this.db.param(1)}, ${this.db.param(2)})`;
+          const h2: string[] = [oldPassword];
+          const stmt2: Statement = {query: sh, params: [userId, h2]};
+          const stmt = buildUpdateTable(pass, this.db.param, this.tables.password, this.id, userId);
+          return this.db.execBatch([stmt, stmt2]);
+        } else {
+          const his: any = v[0];
+          let h2: string[] = [oldPassword];
+          if (his) {
+            if (his[history]) {
+              h2 = his[history];
+            }
+            if (h2) {
+              h2.push(oldPassword);
+            }
+            while (h2.length > this.max) {
+              h2.shift();
+            }
+          }
+          if (this.tables.password === this.tables.history) {
+            pass[history] = h2;
+            const stmt = buildUpdateTable(pass, this.db.param, this.tables.password, this.id, userId);
+            return this.db.exec(stmt.query, stmt.params);
+          } else {
+            const sh = `update ${this.tables.history} set ${this.history} = ${this.db.param(1)} where ${this.id} = ${this.db.param(2)}`;
+            const stmt2: Statement = {query: sh, params: [h2, userId]};
+            const stmt1 = buildUpdateTable(pass, this.db.param, this.tables.password, this.id, userId);
+            return this.db.execBatch([stmt1, stmt2]);
+          }
+        }
+      });
+    } else {
+      const stmt = buildUpdateTable(pass, this.db.param, this.tables.password, this.id, userId);
+      return this.db.exec(stmt.query, stmt.params);
+    }
+  }
+  getHistory(userId: ID, max?: number): Promise<string[]> {
+    const history = this.history;
+    if (history && history.length > 0) {
+      const query = `select ${history} from ${this.tables.history} where ${this.id} = ${this.db.param(1)}`;
+      return this.db.query(query, [userId]).then(v => {
+        if (!v || v.length === 0) {
+          return [];
+        } else {
+          const his: any = v[0];
+          if (his) {
+            const k = his[history];
+            if (Array.isArray(k)) {
+              if (max !== undefined && max > 0) {
+                while (k.length > max) {
+                  k.shift();
+                }
+                return k;
+              } else {
+                return k as string[];
+              }
+            } else {
+              return [];
+            }
+          } else {
+            return [];
+          }
+        }
+      });
+    } else {
+      return Promise.resolve([]);
+    }
+  }
+}
+export function buildUpdateTable<ID, T>(pass: T, buildParam: (i: number) => string, table: string, idName: string, id: ID): Statement {
+  const stmt = buildUpdate(pass, buildParam);
+  const k = stmt.params ? stmt.params.length + 1 : 1;
+  const query = `update ${table} set ${stmt.query} where ${idName} = ${buildParam(k)}`;
+  const params: any[] = [];
+  if (stmt.params && stmt.params.length > 0) {
+    for (const pr of stmt.params) {
+      params.push(pr);
+    }
+  }
+  params.push(id);
+  stmt.query = query;
+  stmt.params = params;
+  return stmt;
+}
+export function buildUpdate<T>(obj: T, buildParam: (i: number) => string): Statement {
+  const keys = Object.keys(obj);
+  const cols: string[] = [];
+  const params: any[] = [];
+  const o: any = obj;
+  let i = 1;
+  for (const key of keys) {
+    const v = o[key];
+    if (v != null) {
+      cols.push(`${key} = ${buildParam(i++)}`);
+      params.push(v);
+    } else if (v == null) {
+      cols.push(`${key} = null`);
+    }
+  }
+  const query = cols.join(',');
+  return { query, params};
+}
+export const SqlRepository = Repository;
+export const PasswordRepository = Repository;
+export const SqlPasswordRepository = Repository;
+export const Service = Repository;
+export const SqlService = Repository;
+export const SqlPasswordService = Repository;
