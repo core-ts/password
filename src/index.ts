@@ -130,7 +130,7 @@ export class PasswordService<ID> {
       return 0;
     }
     if (this.duplicateCount > 0) {
-      const histories = await this.repository.getHistory(user.id, this.duplicateCount - 1);
+      const histories = await this.repository.getHistory(user.id, this.duplicateCount);
       const isDuplicate = await this.duplicate(pass.password, this.duplicateCount, user.password, histories);
       if (isDuplicate) {
         return -1;
@@ -221,7 +221,7 @@ export class PasswordService<ID> {
     }
     const newPassword = await this.comparator.hash(pass.password);
     if (this.duplicateCount > 0) {
-      const histories = await this.repository.getHistory(user.id, this.duplicateCount - 1);
+      const histories = await this.repository.getHistory(user.id, this.duplicateCount);
       const isDuplicate = await this.duplicate(pass.password, this.duplicateCount, user.password, histories);
       if (isDuplicate) {
         return -1;
@@ -246,7 +246,7 @@ export class PasswordService<ID> {
       }
     }
     if (histories && histories.length > 0) {
-      const length = Math.min(count - 2, histories.length);
+      const length = Math.min(count, histories.length);
       const l = histories.length;
       for (let i = 1; i <= length; i++) {
         const equal = await this.comparator.compare(newPassword, histories[l - i]);
@@ -370,7 +370,7 @@ export class Repository<ID> {
     public failCount?: string,
     max?: number,
   ) {
-    this.max = (max !== undefined ? max : 8);
+    this.max = (max !== undefined ? max + 1: 8);
     this.id = (id && id.length > 0 ? id : 'id');
     this.username = (username && username.length > 0 ? username : 'username');
     this.contact = (contact && contact.length > 0 ? contact : 'email');
@@ -512,7 +512,7 @@ export function buildUpdateTable<ID, T>(pass: T, buildParam: (i: number) => stri
   return stmt;
 }
 export function buildUpdate<T>(obj: T, buildParam: (i: number) => string): Statement {
-  const keys = Object.keys(obj);
+  const keys = Object.keys(obj as any);
   const cols: string[] = [];
   const params: any[] = [];
   const o: any = obj;
